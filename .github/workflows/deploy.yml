@@ -1,0 +1,34 @@
+name: Deploy Ubuntu Stack to AWS EC2
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up SSH Key
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+
+    - name: Deploy to Remote Ubuntu Server via SSH
+      env:
+        SERVER_IP: ${{ secrets.AWS_SERVER_IP }}
+        SERVER_USER: ubuntu
+      run: |
+        mkdir -p ~/.ssh
+        echo "$SERVER_IP ecdsa-sha2-nistp256 AAAAE2VjZHNh..." >> ~/.ssh/known_hosts
+        
+        ssh $SERVER_USER@$SERVER_IP << 'EOF'
+          echo "Updating application stack on Ubuntu..."
+          cd /var/www/my-app
+          git pull origin main
+          sudo systemctl reload apache2
+          echo "Deployment finished successfully."
+        EOF
