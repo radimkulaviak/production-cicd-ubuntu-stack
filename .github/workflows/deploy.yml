@@ -1,8 +1,7 @@
 name: Deploy Ubuntu Stack to AWS EC2
 
 on:
-  push:
-    branches: [ main ]
+  workflow_dispatch: # Pouze rucni spusteni, nebude spouštet automaticky pri git push
 
 jobs:
   deploy:
