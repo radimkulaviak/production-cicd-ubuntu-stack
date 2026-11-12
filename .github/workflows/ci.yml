@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: yamllint (workflows)
+        run: |
+          pip install yamllint
+          yamllint -d "{extends: relaxed, rules: {truthy: disable}}" .github/workflows
+
+      - name: shellcheck (shell scripts, if any)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -r shellcheck
