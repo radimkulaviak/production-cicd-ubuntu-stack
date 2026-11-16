@@ -1,7 +1,20 @@
-name: Deploy to Ubuntu server (manual)
+name: Deploy via SSH (releases + health check + rollback)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # manual trigger; enable the push trigger below only after secrets are configured
+  # push:
+  #   branches: [ main ]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: /var/www/my-app
+  HEALTH_URL: https://example.com/health
 
 jobs:
   deploy:
@@ -10,21 +23,62 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Load SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-
-      - name: Trust the server host key
+      - name: Configure SSH (pinned host key)
         env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
-          mkdir -p ~/.ssh
-          echo "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
 
-      - name: Update application and reload Apache
+      - name: Upload release
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" 'cd /var/www/my-app && git pull --ff-only origin main && sudo systemctl reload apache2'
+          set -euo pipefail
+          RELEASE="$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          SSH="ssh -i $HOME/.ssh/id_deploy -o StrictHostKeyChecking=yes"
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$APP_DIR/releases/$RELEASE'"
+          rsync -az --delete --exclude='.git' --exclude='.github' \
+            -e "$SSH" ./ "$DEPLOY_USER@$DEPLOY_HOST:$APP_DIR/releases/$RELEASE/"
+
+      - name: Switch release, health check, rollback on failure
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/id_deploy" -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- "$APP_DIR" "$RELEASE" "$HEALTH_URL" <<'EOF'
+          set -euo pipefail
+          APP_DIR=$1; RELEASE=$2; URL=$3
+          PREV="$(readlink -f "$APP_DIR/current" || true)"
+
+          ln -sfn "$APP_DIR/releases/$RELEASE" "$APP_DIR/current.new"
+          mv -T "$APP_DIR/current.new" "$APP_DIR/current"
+          sudo systemctl reload apache2
+
+          ok=0
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 5 -o /dev/null "$URL"; then ok=1; break; fi
+            sleep 3
+          done
+
+          if [ "$ok" -ne 1 ]; then
+            echo "Health check FAILED - rolling back to: ${PREV:-none}" >&2
+            if [ -n "$PREV" ] && [ -d "$PREV" ]; then
+              ln -sfn "$PREV" "$APP_DIR/current.new"
+              mv -T "$APP_DIR/current.new" "$APP_DIR/current"
+              sudo systemctl reload apache2
+            fi
+            exit 1
+          fi
+
+          # keep the 5 most recent releases
+          ls -1dt "$APP_DIR"/releases/* | tail -n +6 | xargs -r rm -rf
+          echo "Deployment $RELEASE finished successfully."
+          EOF
